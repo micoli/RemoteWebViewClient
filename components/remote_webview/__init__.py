@@ -26,6 +26,8 @@ CONF_MAX_BYTES_PER_MSG = "max_bytes_per_msg"
 CONF_BIG_ENDIAN = "big_endian"
 
 CONF_ON_FRAME_UPDATE = "on_frame_update"
+CONF_ON_DISCONNECT = "on_disconnect"
+CONF_ON_CONNECT = "on_connect"
 CONF_CURRENT_URL_SENSOR = "current_url_sensor"
 
 _SERVER_RE = re.compile(
@@ -60,6 +62,14 @@ OnFrameUpdateTrigger = ns.class_(
     "OnFrameUpdateTrigger", automation.Trigger.template()
 )
 
+OnDisconnectTrigger = ns.class_(
+    "OnDisconnectTrigger", automation.Trigger.template()
+)
+
+OnConnectTrigger = ns.class_(
+    "OnConnectTrigger", automation.Trigger.template()
+)
+
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(RemoteWebView),
@@ -82,6 +92,16 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_ON_FRAME_UPDATE): automation.validate_automation(
             {
                 cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnFrameUpdateTrigger),
+            }
+        ),
+        cv.Optional(CONF_ON_DISCONNECT): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnDisconnectTrigger),
+            }
+        ),
+        cv.Optional(CONF_ON_CONNECT): automation.validate_automation(
+            {
+                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnConnectTrigger),
             }
         ),
         cv.Optional(CONF_CURRENT_URL_SENSOR): text_sensor.text_sensor_schema(),
@@ -143,6 +163,14 @@ async def to_code(config):
     await cg.register_component(var, config)
 
     for conf in config.get(CONF_ON_FRAME_UPDATE, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)
+
+    for conf in config.get(CONF_ON_DISCONNECT, []):
+        trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
+        await automation.build_automation(trigger, [], conf)
+
+    for conf in config.get(CONF_ON_CONNECT, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
         

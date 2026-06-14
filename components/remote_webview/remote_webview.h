@@ -48,12 +48,17 @@ class RemoteWebView : public Component {
   void set_max_bytes_per_msg(int v) { max_bytes_per_msg_ = v; }
   void set_big_endian(bool v) { rgb565_big_endian_ = v; }
   void set_rotation(int v) { rotation_ = v; }
+  void set_streaming_paused(bool v) { streaming_paused_ = v; }
   void disable_touch(bool disable);
   bool open_url(const std::string &s);
   std::string get_current_url() const;
   void set_url_sensor(text_sensor::TextSensor *s) { url_sensor_ = s; }
   void add_on_frame_update_callback(std::function<void()> &&callback);
   void trigger_on_frame_update();
+  void add_on_disconnect_callback(std::function<void()> &&callback);
+  void trigger_on_disconnect();
+  void add_on_connect_callback(std::function<void()> &&callback);
+  void trigger_on_connect();
 
   void setup() override;
   void loop() override;
@@ -72,6 +77,8 @@ class RemoteWebView : public Component {
   };
 
   CallbackManager<void()> on_frame_update_callback_{};
+  CallbackManager<void()> on_disconnect_callback_{};
+  CallbackManager<void()> on_connect_callback_{};
 
   static constexpr bool     kCoalesceMoves  = cfg::coalesce_moves;
   static constexpr uint32_t kMoveRateHz     = cfg::move_rate_hz;
@@ -99,6 +106,7 @@ class RemoteWebView : public Component {
   bool rgb565_big_endian_{true};
   int rotation_{0};
   bool touch_disabled_{false};
+  bool streaming_paused_{false};
 
 #if REMOTE_WEBVIEW_HW_JPEG
   jpeg_decoder_handle_t hw_dec_{nullptr};
@@ -137,6 +145,8 @@ class RemoteWebView : public Component {
 
   std::atomic<bool> frame_update_pending_{false};
   std::atomic<bool> url_publish_pending_{false};
+  std::atomic<bool> connect_pending_{false};
+  std::atomic<bool> disconnect_pending_{false};
   std::string pending_url_{};
   SemaphoreHandle_t state_mtx_{nullptr};
 

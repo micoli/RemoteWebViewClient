@@ -5,7 +5,7 @@ namespace remote_webview {
 namespace cfg {
 
 inline constexpr int decode_task_stack = 32 * 1024;
-inline constexpr int ws_task_stack = 8 * 1024;
+inline constexpr int ws_task_stack = 16 * 1024;
 inline constexpr int ws_task_prio = 5;
 inline constexpr int decode_queue_depth = 12;
 

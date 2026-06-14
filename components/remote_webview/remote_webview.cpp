@@ -25,14 +25,32 @@ void RemoteWebView::add_on_frame_update_callback(std::function<void()> &&callbac
 }
 void RemoteWebView::trigger_on_frame_update() {
   uint32_t now = millis();
-  
+
   if (now - this->last_trigger_ms_ < 1000) return;
-  
+
   this->last_trigger_ms_ = now;
-  
+
   ESP_LOGD(TAG, "Triggering the on_frame_update automation");
   this->on_frame_update_callback_.call();
 }
+
+void RemoteWebView::add_on_disconnect_callback(std::function<void()> &&callback) {
+  this->on_disconnect_callback_.add(std::move(callback));
+}
+void RemoteWebView::trigger_on_disconnect() {
+  ESP_LOGD(TAG, "Triggering the on_disconnect automation");
+  this->on_disconnect_callback_.call();
+}
+
+void RemoteWebView::add_on_connect_callback(std::function<void()> &&callback) {
+  this->on_connect_callback_.add(std::move(callback));
+}
+void RemoteWebView::trigger_on_connect() {
+  this->last_trigger_ms_ = 0;  // reset so on_frame_update fires immediately on next frame
+  ESP_LOGD(TAG, "Triggering the on_connect automation");
+  this->on_connect_callback_.call();
+}
+
 
 void RemoteWebView::process_current_url_packet_(const uint8_t *data, size_t len) {
   if (!data || len < sizeof(proto::CurrentURLHeader)) return;
@@ -145,6 +163,14 @@ void RemoteWebView::setup() {
 void RemoteWebView::loop() {
   if (this->frame_update_pending_.exchange(false, std::memory_order_acq_rel)) {
     this->trigger_on_frame_update();
+  }
+
+  if (this->disconnect_pending_.exchange(false, std::memory_order_acq_rel)) {
+    this->trigger_on_disconnect();
+  }
+
+  if (this->connect_pending_.exchange(false, std::memory_order_acq_rel)) {
+    this->trigger_on_connect();
   }
 
   if (!this->url_sensor_) return;
@@ -272,8 +298,8 @@ void RemoteWebView::ws_event_handler_(void *handler_arg, esp_event_base_t, int32
     case WEBSOCKET_EVENT_CONNECTED:
       if (self_) self_->ws_client_ = e->client;
       ESP_LOGI(TAG, "[ws] connected");
-      
       if (self_) self_->last_keepalive_us_ = esp_timer_get_time();
+      if (self_) self_->connect_pending_.store(true, std::memory_order_release);
       if (self_ && !self_->url_.empty()) {
         self_->ws_send_open_url_(self_->url_.c_str(), 0);
       }
@@ -282,7 +308,8 @@ void RemoteWebView::ws_event_handler_(void *handler_arg, esp_event_base_t, int32
     case WEBSOCKET_EVENT_DISCONNECTED:
       if (self_) self_->ws_client_ = nullptr;
       ESP_LOGI(TAG, "[ws] disconnected");
-      if (self_) self_->last_keepalive_us_ = 0; 
+      if (self_) self_->last_keepalive_us_ = 0;
+      if (self_) self_->disconnect_pending_.store(true, std::memory_order_release);
       reasm_reset_(*r);
       websocket_force_reconnect(e->client);
       break;
@@ -291,7 +318,8 @@ void RemoteWebView::ws_event_handler_(void *handler_arg, esp_event_base_t, int32
     case WEBSOCKET_EVENT_CLOSED:
       if (self_) self_->ws_client_ = nullptr;
       ESP_LOGI(TAG, "[ws] closed");
-      if (self_) self_->last_keepalive_us_ = 0; 
+      if (self_) self_->last_keepalive_us_ = 0;
+      if (self_) self_->disconnect_pending_.store(true, std::memory_order_release);
       reasm_reset_(*r);
       websocket_force_reconnect(e->client);
       break;
@@ -456,6 +484,7 @@ void RemoteWebView::process_frame_stats_packet_(const uint8_t *data, size_t len)
 }
 
 bool RemoteWebView::decode_jpeg_tile_to_lcd_(int16_t dst_x, int16_t dst_y, const uint8_t *data, size_t len) {
+  if (streaming_paused_) return true;
   if (!data || !len) return false;
 
 #if REMOTE_WEBVIEW_HW_JPEG

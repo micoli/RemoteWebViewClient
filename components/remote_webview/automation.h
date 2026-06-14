@@ -28,5 +28,22 @@ class OnFrameUpdateTrigger : public Trigger<> {
   }
 };
 
+// On Disconnect Trigger
+class OnDisconnectTrigger : public Trigger<> {
+ public:
+  explicit OnDisconnectTrigger(RemoteWebView *parent) {
+    parent->add_on_disconnect_callback([this]() { this->trigger(); });
+  }
+};
+
+// On Connect Trigger
+class OnConnectTrigger : public Trigger<> {
+ public:
+  explicit OnConnectTrigger(RemoteWebView *parent) {
+    parent->add_on_connect_callback([this]() { this->trigger(); });
+  }
+};
+
+
 }  // namespace remote_webview
 }  // namespace esphome
