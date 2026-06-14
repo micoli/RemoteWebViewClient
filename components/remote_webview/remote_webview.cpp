@@ -71,8 +71,25 @@ void RemoteWebView::setup() {
     return;
   }
 
-  display_width_ = display_->get_width();
-  display_height_ = display_->get_height();
+  // Detect display rotation and compute PHYSICAL frame buffer dimensions.
+  // draw_pixels_at() writes to the physical frame buffer directly (bypasses
+  // ESPHome's software rotation transform). The server must therefore receive
+  // the physical dimensions and apply the matching rotation so that tile
+  // coordinates arrive in physical frame buffer space.
+  switch (display_->get_rotation()) {
+    case display::DISPLAY_ROTATION_90_DEGREES:  display_rotation_ = 90;  break;
+    case display::DISPLAY_ROTATION_180_DEGREES: display_rotation_ = 180; break;
+    case display::DISPLAY_ROTATION_270_DEGREES: display_rotation_ = 270; break;
+    default:                                    display_rotation_ = 0;   break;
+  }
+  if (display_rotation_ == 90 || display_rotation_ == 270) {
+    // Logical w/h are swapped vs physical when rotation is 90° or 270°
+    display_width_  = display_->get_height();
+    display_height_ = display_->get_width();
+  } else {
+    display_width_  = display_->get_width();
+    display_height_ = display_->get_height();
+  }
 
   q_decode_ = xQueueCreate(cfg::decode_queue_depth, sizeof(WsMsg));
   ws_send_mtx_ = xSemaphoreCreateMutex();
@@ -181,6 +198,8 @@ void RemoteWebView::dump_config() {
   print_opt_int   ("max_bytes_per_msg",         max_bytes_per_msg_);
   print_opt_int   ("big_endian",                rgb565_big_endian_);
   print_opt_int   ("rotation",                  rotation_);
+  ESP_LOGCONFIG(TAG, "  display_rotation: %d", display_rotation_);
+  ESP_LOGCONFIG(TAG, "  total_rotation: %d", (display_rotation_ + rotation_) % 360);
 }
 
 bool RemoteWebView::open_url(const std::string &s) {
@@ -536,6 +555,60 @@ bool RemoteWebView::ws_send_touch_event_(proto::TouchType type, int x, int y, ui
   if (!ws_client_ || !ws_send_mtx_ || !esp_websocket_client_is_connected(ws_client_))
     return false;
 
+  if (type == proto::TouchType::Down) {
+    const uint64_t now_us = esp_timer_get_time();
+    if (now_us - last_down_us_ < 200000ULL) {
+      ESP_LOGW(TAG, "[touch_send] Down DEDUP-SKIPPED dt=%llu us", (unsigned long long)(now_us - last_down_us_));
+      return false;
+    }
+    last_down_us_ = now_us;
+  }
+
+  if (type == proto::TouchType::Up) {
+    const uint64_t now_us = esp_timer_get_time();
+    if (now_us - last_up_us_ < 50000ULL) {
+      ESP_LOGW(TAG, "[touch_send] Up DEDUP-SKIPPED dt=%llu us", (unsigned long long)(now_us - last_up_us_));
+      return false;
+    }
+    last_up_us_ = now_us;
+  }
+
+  ESP_LOGD(TAG, "[touch] raw x=%d y=%d rot=%d", x, y, display_rotation_);
+
+  // The server applies mapPointForRotation(total_rotation) to coordinates it receives.
+  // We want the browser to receive the *visual* (unrotated) coordinates so that
+  // gestures feel natural (left→right swipe = horizontal browser movement, etc.).
+  // Pre-apply the INVERSE of total_rotation here so the server's forward mapping
+  // cancels out and the browser ends up with the original visual coordinates.
+  //
+  //   total=90 : pre-inverse = 270° → (H-1-y, x)
+  //   total=180: pre-inverse = 180° → (W-1-x, H-1-y)
+  //   total=270: pre-inverse = 90°  → (y, W-1-x)
+  const int total_rotation = (display_rotation_ + rotation_) % 360;
+  switch (total_rotation) {
+    case 90: {
+      const int new_x = (display_height_ - 1) - y;
+      const int new_y = x;
+      x = new_x; y = new_y;
+      break;
+    }
+    case 180: {
+      x = (display_width_  - 1) - x;
+      y = (display_height_ - 1) - y;
+      break;
+    }
+    case 270: {
+      const int new_x = y;
+      const int new_y = (display_width_ - 1) - x;
+      x = new_x; y = new_y;
+      break;
+    }
+    default:
+      break;
+  }
+
+  ESP_LOGD(TAG, "[touch] vis x=%d y=%d", x, y);
+
   if (x < 0) x = 0; if (y < 0) y = 0;
   if (x > 65535) x = 65535; if (y > 65535) y = 65535;
 
@@ -601,17 +674,24 @@ void RemoteWebViewTouchListener::update(const touchscreen::TouchPoints_t &pts) {
   for (auto &p : pts) {
     switch (p.state) {
       case touchscreen::STATE_PRESSED:
-        parent_->ws_send_touch_event_(proto::TouchType::Down, p.x, p.y, p.id);
+        // Down already sent by touch() — skip to avoid double touchStart
         break;
       case touchscreen::STATE_UPDATED:
+        parent_->last_touch_x_ = p.x;
+        parent_->last_touch_y_ = p.y;
+        parent_->last_touch_id_ = p.id;
         if (!RemoteWebView::kCoalesceMoves || RemoteWebView::kMoveIntervalUs == 0 ||
             (now - parent_->last_move_us_) >= RemoteWebView::kMoveIntervalUs) {
           parent_->last_move_us_ = now;
-          parent_->ws_send_touch_event_(proto::TouchType::Move, p.x, p.y, p.id);
+          bool ok = parent_->ws_send_touch_event_(proto::TouchType::Move, p.x, p.y, p.id);
+          if (ok) parent_->scroll_move_count_++;
+          else    parent_->scroll_drop_count_++;
         }
         break;
       case touchscreen::STATE_RELEASING:
       case touchscreen::STATE_RELEASED:
+        ESP_LOGD(TAG, "[scroll] UP    display=(%d,%d) moves=%u drops=%u",
+                 p.x, p.y, parent_->scroll_move_count_, parent_->scroll_drop_count_);
         parent_->ws_send_touch_event_(proto::TouchType::Up, p.x, p.y, p.id);
         break;
       default: break;
@@ -621,13 +701,22 @@ void RemoteWebViewTouchListener::update(const touchscreen::TouchPoints_t &pts) {
 
 void RemoteWebViewTouchListener::release() {
   if (!parent_) return;
-  
-  parent_->ws_send_touch_event_(proto::TouchType::Up, 0, 0, 0);
+  ESP_LOGD(TAG, "[scroll] RELEASE display=(%d,%d) moves=%u drops=%u",
+           parent_->last_touch_x_, parent_->last_touch_y_,
+           parent_->scroll_move_count_, parent_->scroll_drop_count_);
+  parent_->ws_send_touch_event_(proto::TouchType::Up,
+                                 parent_->last_touch_x_, parent_->last_touch_y_,
+                                 parent_->last_touch_id_);
 }
 
 void RemoteWebViewTouchListener::touch(touchscreen::TouchPoint tp) {
   if (!parent_) return;
-  
+  ESP_LOGD(TAG, "[scroll] DOWN  display=(%d,%d)", tp.x, tp.y);
+  parent_->scroll_move_count_ = 0;
+  parent_->scroll_drop_count_ = 0;
+  parent_->last_touch_x_ = tp.x;
+  parent_->last_touch_y_ = tp.y;
+  parent_->last_touch_id_ = tp.id;
   parent_->ws_send_touch_event_(proto::TouchType::Down, tp.x, tp.y, tp.id);
 }
 
@@ -720,7 +809,9 @@ std::string RemoteWebView::build_ws_uri_() const {
   append_q_int_(uri, "w", display_width_);
   append_q_int_(uri, "h", display_height_);
 
-  append_q_int_(uri,   "r",    rotation_);
+  // Combine display's physical rotation with any user-defined additional rotation
+  const int total_rotation = (display_rotation_ + rotation_) % 360;
+  append_q_int_(uri,   "r",    total_rotation);
   append_q_int_(uri,   "ts",   tile_size_);
   append_q_int_(uri,   "fftc", full_frame_tile_count_);
   append_q_float_(uri, "ffat", full_frame_area_threshold_);

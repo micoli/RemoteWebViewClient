@@ -3,8 +3,13 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome import automation
 from esphome.components import display, touchscreen, text_sensor
-from esphome.components.display import validate_rotation
 from esphome.const import CONF_ID, CONF_DISPLAY_ID, CONF_URL, CONF_ROTATION, CONF_TRIGGER_ID
+
+def validate_rotation(value):
+    value = cv.int_(value)
+    if value not in (0, 90, 180, 270):
+        raise cv.Invalid(f"Rotation must be 0, 90, 180, or 270 degrees, got {value}")
+    return value
 
 
 CONF_DEVICE_ID = "device_id"

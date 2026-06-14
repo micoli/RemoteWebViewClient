@@ -110,6 +110,13 @@ class RemoteWebView : public Component {
 
   uint64_t last_move_us_{0};
   uint64_t last_keepalive_us_{0};
+  uint64_t last_down_us_{0};
+  uint64_t last_up_us_{0};
+  int last_touch_x_{0};
+  int last_touch_y_{0};
+  uint8_t last_touch_id_{0};
+  uint32_t scroll_move_count_{0};
+  uint32_t scroll_drop_count_{0};
   
   uint64_t frame_start_us_ = 0;
   uint32_t frame_id_{0xffffffffu};
@@ -125,6 +132,8 @@ class RemoteWebView : public Component {
   TaskHandle_t      t_decode_{nullptr};
 
   esp_websocket_client_handle_t ws_client_{nullptr};
+
+  int display_rotation_{0}; // display native rotation in degrees (auto-detected in setup)
 
   std::atomic<bool> frame_update_pending_{false};
   std::atomic<bool> url_publish_pending_{false};
