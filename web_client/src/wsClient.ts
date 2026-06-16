@@ -11,6 +11,7 @@ import {
   parseDeviceListPacket,
   parseFramePacket,
   parseCurrentURLPacket,
+  parseFrameStatsPacket,
   QueryOptions,
   TouchType
 } from "./protocol";
@@ -25,6 +26,7 @@ type Metrics = {
   bytes: number;
   lastFrameId: number;
   lastError: string;
+  adaptedInterval?: number;
 };
 
 export type LoggedPacket =
@@ -56,6 +58,7 @@ export class RemoteWebViewBrowserClient {
   private bytes = 0;
   private lastFrameId = -1;
   private lastError = "";
+  private adaptedInterval?: number;
 
   private lastMoveAt = 0;
 
@@ -266,7 +269,15 @@ export class RemoteWebViewBrowserClient {
     }
 
     if (type === MsgType.FrameStats) {
-      this.handlers.onPacket?.({ kind: 'text', dir: 'in', typeId: MsgType.FrameStats, label: 'FrameStats', content: '' });
+      const stats = parseFrameStatsPacket(buffer);
+      if (stats?.adaptedInterval != null) {
+        this.adaptedInterval = stats.adaptedInterval;
+      }
+      const isTrigger = !stats || stats.avgTime === 0;
+      const content = isTrigger
+        ? 'trigger'
+        : `avg=${stats.avgTime}ms adapted=${stats.adaptedInterval ?? '—'}ms`;
+      this.handlers.onPacket?.({ kind: 'text', dir: 'in', typeId: MsgType.FrameStats, label: 'FrameStats', content });
       this.pushMetrics("connected");
       return;
     }
@@ -302,7 +313,8 @@ export class RemoteWebViewBrowserClient {
       frames: this.frames,
       bytes: this.bytes,
       lastFrameId: this.lastFrameId,
-      lastError: this.lastError
+      lastError: this.lastError,
+      adaptedInterval: this.adaptedInterval,
     });
   }
 }

@@ -95,6 +95,7 @@ root.innerHTML = `
         <span class="sb-chip sb-device"><span class="sb-label">device</span><span class="sb-val" id="sb-device">—</span></span>
         <span class="sb-chip sb-zoom"><span class="sb-label">zoom</span><select id="scale" class="scale-inline" aria-label="Scale"></select></span>
         <span class="sb-chip"><span class="sb-label">frame</span><span class="sb-val" id="sb-frame">—</span></span>
+        <span class="sb-chip"><span class="sb-label">mfi</span><span class="sb-val" id="sb-mfi">—</span></span>
         <span class="sb-chip sb-err"><span class="sb-label">err</span><span class="sb-val" id="sb-err">—</span></span>
       </div>
       <div class="stream-row">
@@ -126,6 +127,7 @@ const elMsglogFilters = byId<HTMLDivElement>("msglogFilters");
 const elSbDot = byId<HTMLSpanElement>("sb-dot");
 const elSbStatusText = byId<HTMLSpanElement>("sb-status-text");
 const elSbFrame = byId<HTMLSpanElement>("sb-frame");
+const elSbMfi = byId<HTMLSpanElement>("sb-mfi");
 const elSbErr = byId<HTMLSpanElement>("sb-err");
 const elSbDevice = byId<HTMLSpanElement>("sb-device");
 const elCurrentUrlDisplay = byId<HTMLDivElement>("currentUrlDisplay");
@@ -169,6 +171,7 @@ const client = new RemoteWebViewBrowserClient(renderer, {
     elSbStatusText.textContent = metrics.status;
     elSbDot.className = `sb-dot sb-dot--${metrics.status}`;
     elSbFrame.textContent = `${metrics.lastFrameId ?? "—"}/${metrics.frames ?? "—"}(${fmtBytes(metrics.bytes)})`;
+    elSbMfi.textContent = metrics.adaptedInterval != null ? `${metrics.adaptedInterval}ms` : "—";
     elSbErr.textContent = metrics.lastError || "—";
     elSbErr.classList.toggle("sb-val--err", !!metrics.lastError);
     elSbDevice.textContent = client.currentDeviceId ?? "—";

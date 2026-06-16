@@ -76,9 +76,17 @@ export type CurrentURLPacket = {
   url: string;
 };
 
+export type FrameStatsInfo = {
+  avgTime: number;
+  bytes: number;
+  adaptedInterval: number | null;
+};
+
 const FRAME_HEADER_SIZE = 11;
 const TILE_HEADER_SIZE = 12;
 const CURRENT_URL_HEADER_SIZE = 6;
+const FRAME_STATS_HEADER_SIZE = 10;
+const FRAME_STATS_EXTENDED_SIZE = 14;
 
 export function buildWsUri(server: string, opts: QueryOptions): string {
   const serverNormalized = server.startsWith("ws://") || server.startsWith("wss://") ? server : `ws://${server}`;
@@ -232,6 +240,18 @@ export function buildKillDevicePacket(id: string): Uint8Array {
   view.setUint32(2, payload.length, true);
   out.set(payload, 6);
   return out;
+}
+
+export function parseFrameStatsPacket(buffer: ArrayBuffer): FrameStatsInfo | null {
+  if (buffer.byteLength < FRAME_STATS_HEADER_SIZE) return null;
+  const view = new DataView(buffer);
+  if (view.getUint8(0) !== MsgType.FrameStats) return null;
+  const avgTime = view.getUint32(2, true);
+  const bytes = view.getUint32(6, true);
+  const adaptedInterval = buffer.byteLength >= FRAME_STATS_EXTENDED_SIZE
+    ? view.getUint32(10, true)
+    : null;
+  return { avgTime, bytes, adaptedInterval };
 }
 
 export function buildKeepalivePacket(): Uint8Array {
