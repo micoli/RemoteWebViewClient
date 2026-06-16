@@ -101,11 +101,14 @@ void RemoteWebView::set_obj(lv_obj_t *canvas_obj) {
   display_width_  = W;
   display_height_ = H;
   display_rotation_ = 0;  // LVGL handles display rotation internally
-  canvas_stride_ = (uint32_t)(W * sizeof(lv_color_t));
+  canvas_stride_ = (uint32_t)(W * 2);  // 2 bytes per pixel for RGB565
+  // LV_COLOR_FORMAT_RGB565 stores pixels little-endian on ARM; force the JPEG
+  // decoder to output little-endian so bytes land correctly in the canvas buffer.
+  rgb565_big_endian_ = false;
   canvas_x_off_ = (int)lv_obj_get_style_x(canvas_obj, LV_PART_MAIN);
   canvas_y_off_ = (int)lv_obj_get_style_y(canvas_obj, LV_PART_MAIN);
 
-  const size_t buf_size = (size_t)W * H * sizeof(lv_color_t);
+  const size_t buf_size = (size_t)W * H * 2;
   canvas_buf_ = (uint8_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!canvas_buf_) canvas_buf_ = (uint8_t *)heap_caps_malloc(buf_size, MALLOC_CAP_8BIT);
   if (!canvas_buf_) {
@@ -114,8 +117,7 @@ void RemoteWebView::set_obj(lv_obj_t *canvas_obj) {
   }
   memset(canvas_buf_, 0, buf_size);
 
-  // LVGL 8.x canvas API
-  lv_canvas_set_buffer(canvas_obj, canvas_buf_, (lv_coord_t)W, (lv_coord_t)H, LV_IMG_CF_TRUE_COLOR);
+  lv_canvas_set_buffer(canvas_obj, canvas_buf_, (int32_t)W, (int32_t)H, LV_COLOR_FORMAT_RGB565);
   ESP_LOGD(TAG, "canvas: %dx%d stride=%u buf=%p", W, H, (unsigned)canvas_stride_, (void*)canvas_buf_);
 }
 

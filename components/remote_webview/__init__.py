@@ -118,7 +118,7 @@ try:
             )
 
         def get_uses(self):
-            return ("canvas", "img")
+            return ("canvas", "image")
 
         async def obj_creator(self, parent, config):
             return lv_expr.call("canvas_create", parent)
