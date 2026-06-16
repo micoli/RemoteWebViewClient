@@ -1,11 +1,14 @@
 import {
   buildKeepalivePacket,
+  buildKillDevicePacket,
   buildOpenUrlPacket,
   buildTouchPacket,
   buildWsUri,
+  DeviceSummary,
   Encoding,
   FLAG_LAST_OF_FRAME,
   MsgType,
+  parseDeviceListPacket,
   parseFramePacket,
   parseCurrentURLPacket,
   QueryOptions,
@@ -24,13 +27,20 @@ type Metrics = {
   lastError: string;
 };
 
+export type LoggedPacket =
+  | { kind: 'tile'; dir: 'in'; typeId: number; frameId: number; x: number; y: number; w: number; h: number; data: Uint8Array }
+  | { kind: 'text'; dir: 'in' | 'out'; typeId: number; label: string; content: string };
+
 type Handlers = {
   onMetrics: (metrics: Metrics) => void;
   onURL: (url: string) => void;
+  onDeviceList: (devices: DeviceSummary[]) => void;
+  onPacket?: (pkt: LoggedPacket) => void;
 };
 
 export class RemoteWebViewBrowserClient {
   private ws: WebSocket | null = null;
+  currentDeviceId: string | null = null;
   private readonly renderer: CanvasRenderer;
   private readonly handlers: Handlers;
 
@@ -45,7 +55,7 @@ export class RemoteWebViewBrowserClient {
   private frames = 0;
   private bytes = 0;
   private lastFrameId = -1;
-  private lastError = "-";
+  private lastError = "";
 
   private lastMoveAt = 0;
 
@@ -67,15 +77,23 @@ export class RemoteWebViewBrowserClient {
 
     ws.onopen = () => {
       this.ws = ws;
+      this.currentDeviceId = new URL(ws.url).searchParams.get("id");
       this.reconnectDelayMs = 1000;
       this.startKeepalive();
       this.pushMetrics("connected");
     };
 
     ws.onclose = () => {
+      this.currentDeviceId = null;
       this.stopKeepalive();
+      this.handlers.onDeviceList([]);
       this.pushMetrics("disconnected");
-      this.scheduleReconnect(server, options);
+      // After an attached session ends, reconnect as a fresh browser device
+      // (new id, no attach) so the reconnect doesn't keep borrowing the device's slot.
+      const reconnectOptions = options.attach
+        ? { ...options, id: undefined, attach: false }
+        : options;
+      this.scheduleReconnect(server, reconnectOptions);
     };
 
     ws.onerror = () => {
@@ -117,8 +135,18 @@ export class RemoteWebViewBrowserClient {
       this.ws = null;
     }
 
+    this.currentDeviceId = null;
+    this.handlers.onDeviceList([]);
+
     this.inboundQueue.length = 0;
     this.processing = false;
+  }
+
+  sendKillDevice(id: string): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    this.ws.send(buildKillDevicePacket(id));
+    this.handlers.onPacket?.({ kind: 'text', dir: 'out', typeId: MsgType.KillDevice, label: 'KillDevice', content: id });
+    return true;
   }
 
   sendOpenUrl(url: string): boolean {
@@ -128,6 +156,7 @@ export class RemoteWebViewBrowserClient {
 
     const payload = buildOpenUrlPacket(url);
     this.ws.send(payload);
+    this.handlers.onPacket?.({ kind: 'text', dir: 'out', typeId: MsgType.OpenURL, label: 'OpenURL', content: url });
     return true;
   }
 
@@ -147,6 +176,7 @@ export class RemoteWebViewBrowserClient {
 
     const payload = buildTouchPacket(type, pointerId, x, y);
     this.ws.send(payload);
+    this.handlers.onPacket?.({ kind: 'text', dir: 'out', typeId: MsgType.Touch, label: 'Touch', content: `${TouchType[type]} @${x},${y} p${pointerId}` });
   }
 
   private scheduleReconnect(server: string, options: QueryOptions): void {
@@ -166,6 +196,7 @@ export class RemoteWebViewBrowserClient {
     this.keepaliveId = window.setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(buildKeepalivePacket());
+        this.handlers.onPacket?.({ kind: 'text', dir: 'out', typeId: MsgType.Keepalive, label: 'Keepalive', content: '' });
       }
     }, KEEPALIVE_INTERVAL_MS);
   }
@@ -216,6 +247,14 @@ export class RemoteWebViewBrowserClient {
           continue;
         }
         await this.renderer.drawJpegTile(tile.data, tile.x, tile.y, tile.w, tile.h);
+        this.handlers.onPacket?.({
+          kind: 'tile',
+          dir: 'in',
+          typeId: MsgType.Frame,
+          frameId: parsed.header.frameId,
+          x: tile.x, y: tile.y, w: tile.w, h: tile.h,
+          data: tile.data.slice(),
+        });
       }
 
       if (parsed.header.flags & FLAG_LAST_OF_FRAME) {
@@ -227,6 +266,7 @@ export class RemoteWebViewBrowserClient {
     }
 
     if (type === MsgType.FrameStats) {
+      this.handlers.onPacket?.({ kind: 'text', dir: 'in', typeId: MsgType.FrameStats, label: 'FrameStats', content: '' });
       this.pushMetrics("connected");
       return;
     }
@@ -238,7 +278,17 @@ export class RemoteWebViewBrowserClient {
         this.pushMetrics("warning");
         return;
       }
+      this.handlers.onPacket?.({ kind: 'text', dir: 'in', typeId: MsgType.CurrentURL, label: 'CurrentURL', content: parsed.url });
       this.handlers.onURL(parsed.url);
+      return;
+    }
+
+    if (type === MsgType.DeviceList) {
+      const parsed = parseDeviceListPacket(buffer);
+      if (parsed) {
+        this.handlers.onPacket?.({ kind: 'text', dir: 'in', typeId: MsgType.DeviceList, label: 'DeviceList', content: `${parsed.length} device(s): ${parsed.map(d => d.id).join(', ')}` });
+        this.handlers.onDeviceList(parsed);
+      }
       return;
     }
 

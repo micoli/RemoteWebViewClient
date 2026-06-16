@@ -8,8 +8,16 @@ export enum MsgType {
   FrameStats = 3,
   OpenURL = 4,
   Keepalive = 5,
-  CurrentURL = 6
+  CurrentURL = 6,
+  DeviceList = 7,
+  KillDevice = 8,
 }
+
+export type DeviceSummary = {
+  id: string;
+  url: string;
+  lastActive: number;
+};
 
 export enum Encoding {
   Unknown = 0,
@@ -29,6 +37,7 @@ export enum TouchType {
 
 export type QueryOptions = {
   id?: string;
+  attach?: boolean;
   w: number;
   h: number;
   r?: number;
@@ -75,11 +84,17 @@ export function buildWsUri(server: string, opts: QueryOptions): string {
   const serverNormalized = server.startsWith("ws://") || server.startsWith("wss://") ? server : `ws://${server}`;
   const base = new URL(serverNormalized.includes("/") ? serverNormalized : `${serverNormalized}/`);
 
+  const randId = () => (typeof crypto !== "undefined" && crypto.randomUUID)
+    ? crypto.randomUUID().slice(0, 8)
+    : Math.random().toString(36).slice(2, 10);
   const entries: Array<[string, string]> = [
-    ["id", opts.id ?? `browser-${crypto.randomUUID().slice(0, 8)}`],
+    ["id", opts.id ?? `browser-${randId()}`],
+    ["type", "browser"],
     ["w", String(opts.w)],
     ["h", String(opts.h)]
   ];
+
+  if (opts.attach) entries.push(["attach", "1"]);
 
   appendOptional(entries, "r", opts.r);
   appendOptional(entries, "ts", opts.ts);
@@ -103,6 +118,19 @@ function appendOptional(entries: Array<[string, string]>, key: string, value: nu
     return;
   }
   entries.push([key, String(value)]);
+}
+
+export function parseDeviceListPacket(buffer: ArrayBuffer): DeviceSummary[] | null {
+  if (buffer.byteLength < 6) return null;
+  const view = new DataView(buffer);
+  const len = view.getUint32(2, true);
+  if (buffer.byteLength < 6 + len) return null;
+  try {
+    const json = new TextDecoder().decode(new Uint8Array(buffer, 6, len));
+    return JSON.parse(json) as DeviceSummary[];
+  } catch {
+    return null;
+  }
 }
 
 export function parseCurrentURLPacket(buffer: ArrayBuffer): CurrentURLPacket | null {
@@ -192,6 +220,17 @@ export function buildOpenUrlPacket(url: string, flags = 0): Uint8Array {
   view.setUint16(2, flags, true);
   view.setUint32(4, payload.length, true);
   out.set(payload, 8);
+  return out;
+}
+
+export function buildKillDevicePacket(id: string): Uint8Array {
+  const payload = new TextEncoder().encode(id);
+  const out = new Uint8Array(6 + payload.length);
+  const view = new DataView(out.buffer);
+  view.setUint8(0, MsgType.KillDevice);
+  view.setUint8(1, PROTOCOL_VERSION);
+  view.setUint32(2, payload.length, true);
+  out.set(payload, 6);
   return out;
 }
 
