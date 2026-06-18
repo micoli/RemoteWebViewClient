@@ -30,6 +30,9 @@ CONF_ON_DISCONNECT = "on_disconnect"
 CONF_ON_CONNECT = "on_connect"
 CONF_CURRENT_URL_SENSOR = "current_url_sensor"
 
+# Used in the LVGL widget schema to reference an existing RemoteWebView component
+CONF_REMOTE_WEBVIEW_ID = "remote_webview_id"
+
 _SERVER_RE = re.compile(
     r"^(?P<host>[A-Za-z0-9](?:[A-Za-z0-9\-\.]*[A-Za-z0-9])?)\:(?P<port>\d{1,5})$"
 )
@@ -70,14 +73,77 @@ OnConnectTrigger = ns.class_(
     "OnConnectTrigger", automation.Trigger.template()
 )
 
+# ---------------------------------------------------------------------------
+# LVGL widget registration
+# The LVGL widget does ONE thing: call set_obj(canvas) on an existing
+# RemoteWebView component. All other configuration stays in the top-level
+# remote_webview: section.
+#
+# Usage in YAML:
+#   remote_webview:          # top-level: creates and configures the component
+#     id: rwv
+#     server: host:port
+#     url: http://...
+#     ...
+#
+#   lvgl:
+#     pages:
+#       - id: webview_page
+#         widgets:
+#           - remote_webview:      # LVGL widget: connects canvas to component
+#               remote_webview_id: rwv
+# ---------------------------------------------------------------------------
+try:
+    from esphome.components.lvgl.widgets import WidgetType, Widget
+    from esphome.components.lvgl.types import LvType
+    from esphome.components.lvgl.lvcode import lv_expr
+    from esphome.components.lvgl.defines import CONF_MAIN
+
+    # Non-compound canvas type — LVGL creates lv_canvas_create(parent) and
+    # manages the lv_obj_t*. Our to_code just calls set_obj() on the component.
+    _lv_canvas_t = LvType("lv_canvas_t")
+
+    _LVGL_WIDGET_SCHEMA = cv.Schema({
+        cv.Required(CONF_REMOTE_WEBVIEW_ID): cv.use_id(RemoteWebView),
+    })
+
+    class _RemoteWebViewWidgetType(WidgetType):
+        def __init__(self):
+            super().__init__(
+                "remote_webview",
+                _lv_canvas_t,
+                (CONF_MAIN,),
+                schema=_LVGL_WIDGET_SCHEMA,
+                modify_schema={},
+            )
+
+        def get_uses(self):
+            return ("canvas", "img")
+
+        async def obj_creator(self, parent, config):
+            return lv_expr.call("canvas_create", parent)
+
+        async def to_code(self, w: Widget, config: dict):
+            # w.obj is the lv_canvas_t* created by obj_creator.
+            # Just wire it to the RemoteWebView component.
+            var = await cg.get_variable(config[CONF_REMOTE_WEBVIEW_ID])
+            cg.add(var.set_obj(w.obj))
+
+    _RemoteWebViewWidgetType()  # auto-registers in WIDGET_TYPES
+    _LVGL_WIDGET_AVAILABLE = True
+except Exception:
+    _LVGL_WIDGET_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Top-level component schema (standalone + LVGL modes)
+# ---------------------------------------------------------------------------
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(): cv.declare_id(RemoteWebView),
-        cv.GenerateID(CONF_DISPLAY_ID): cv.use_id(display.Display),
-        cv.GenerateID(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
+        cv.Optional(CONF_DISPLAY_ID): cv.use_id(display.Display),
+        cv.Optional(CONF_TOUCHSCREEN_ID): cv.use_id(touchscreen.Touchscreen),
         cv.Required(CONF_SERVER): validate_host_port,
         cv.Required(CONF_URL): cv.string,
-
         cv.Optional(CONF_DEVICE_ID): cv.string,
         cv.Optional(CONF_TILE_SIZE): cv.int_,
         cv.Optional(CONF_FULL_FRAME_TILE_COUNT): cv.int_,
@@ -90,53 +156,48 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_BIG_ENDIAN): cv.boolean,
         cv.Optional(CONF_ROTATION): validate_rotation,
         cv.Optional(CONF_ON_FRAME_UPDATE): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnFrameUpdateTrigger),
-            }
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnFrameUpdateTrigger)}
         ),
         cv.Optional(CONF_ON_DISCONNECT): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnDisconnectTrigger),
-            }
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnDisconnectTrigger)}
         ),
         cv.Optional(CONF_ON_CONNECT): automation.validate_automation(
-            {
-                cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnConnectTrigger),
-            }
+            {cv.GenerateID(CONF_TRIGGER_ID): cv.declare_id(OnConnectTrigger)}
         ),
         cv.Optional(CONF_CURRENT_URL_SENSOR): text_sensor.text_sensor_schema(),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
-# Action Schema for the automation
 REMOTEWEBVIEW_ACTION_SCHEMA = cv.Schema(
     {
         cv.Required(CONF_ID): cv.use_id(RemoteWebView),
     }
 )
 
+
 @automation.register_action(
     "remote_webview.trigger_on_frame_update",
     TriggerOnFrameUpdateAction,
     REMOTEWEBVIEW_ACTION_SCHEMA,
 )
-
 async def remote_webview_trigger_on_frame_update_to_code(config, action_id, template_arg, args):
     paren = await cg.get_variable(config[CONF_ID])
     return cg.new_Pvariable(action_id, template_arg, paren)
 
+
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
 
-    disp = await cg.get_variable(config[CONF_DISPLAY_ID])
-    cg.add(var.set_display(disp))
+    if CONF_DISPLAY_ID in config:
+        disp = await cg.get_variable(config[CONF_DISPLAY_ID])
+        cg.add(var.set_display(disp))
+
     cg.add(var.set_server(config[CONF_SERVER]))
     cg.add(var.set_url(config[CONF_URL]))
 
     if CONF_TOUCHSCREEN_ID in config:
         ts = await cg.get_variable(config[CONF_TOUCHSCREEN_ID])
         cg.add(var.set_touchscreen(ts))
-
     if CONF_DEVICE_ID in config:
         cg.add(var.set_device_id(config[CONF_DEVICE_ID]))
     if CONF_TILE_SIZE in config:
@@ -173,7 +234,7 @@ async def to_code(config):
     for conf in config.get(CONF_ON_CONNECT, []):
         trigger = cg.new_Pvariable(conf[CONF_TRIGGER_ID], var)
         await automation.build_automation(trigger, [], conf)
-        
+
     if CONF_CURRENT_URL_SENSOR in config:
         sens = await text_sensor.new_text_sensor(config[CONF_CURRENT_URL_SENSOR])
         cg.add(var.set_url_sensor(sens))

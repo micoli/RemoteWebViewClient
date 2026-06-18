@@ -81,8 +81,81 @@ static inline void websocket_force_reconnect(esp_websocket_client_handle_t clien
   esp_websocket_client_start(client);
 }
 
+#ifdef USE_LVGL
+void RemoteWebView::set_obj(lv_obj_t *canvas_obj) {
+  canvas_obj_ = canvas_obj;
+  lvgl_mode_ = true;
+
+  // ESPHome uses lv_obj_set_STYLE_width/height (not lv_obj_set_width/height), so
+  // lv_obj_get_width() returns the LVGL default (100) until layout runs.
+  // lv_obj_get_style_width() reads the style value that ESPHome already wrote.
+  // lv_canvas_set_buffer() will call lv_obj_set_size(W, H) which must match, otherwise
+  // it overrides the style and the canvas ends up at the wrong size.
+  int W = (int)lv_obj_get_style_width(canvas_obj, LV_PART_MAIN);
+  int H = (int)lv_obj_get_style_height(canvas_obj, LV_PART_MAIN);
+  if (W <= 0 || H <= 0) {
+    lv_disp_t *disp = lv_disp_get_default();
+    W = disp ? (int)lv_disp_get_hor_res(disp) : 480;
+    H = disp ? (int)lv_disp_get_ver_res(disp) : 480;
+  }
+  display_width_  = W;
+  display_height_ = H;
+  display_rotation_ = 0;  // LVGL handles display rotation internally
+  canvas_stride_ = (uint32_t)(W * sizeof(lv_color_t));
+  canvas_x_off_ = (int)lv_obj_get_style_x(canvas_obj, LV_PART_MAIN);
+  canvas_y_off_ = (int)lv_obj_get_style_y(canvas_obj, LV_PART_MAIN);
+
+  const size_t buf_size = (size_t)W * H * sizeof(lv_color_t);
+  canvas_buf_ = (uint8_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!canvas_buf_) canvas_buf_ = (uint8_t *)heap_caps_malloc(buf_size, MALLOC_CAP_8BIT);
+  if (!canvas_buf_) {
+    ESP_LOGE(TAG, "canvas: malloc %u failed", (unsigned)buf_size);
+    return;
+  }
+  memset(canvas_buf_, 0, buf_size);
+
+  // LVGL 8.x canvas API
+  lv_canvas_set_buffer(canvas_obj, canvas_buf_, (lv_coord_t)W, (lv_coord_t)H, LV_IMG_CF_TRUE_COLOR);
+  ESP_LOGD(TAG, "canvas: %dx%d stride=%u buf=%p", W, H, (unsigned)canvas_stride_, (void*)canvas_buf_);
+}
+
+void RemoteWebView::write_tile_to_canvas_(int x, int y, int w, int h, int src_stride, const uint8_t *pixels) {
+  if (!canvas_buf_) return;
+  for (int row = 0; row < h; row++) {
+    int dy = y + row;
+    if (dy < 0 || dy >= display_height_) continue;
+    int dx = x, dw = w;
+    const uint8_t *src_row = pixels + row * src_stride * 2;
+    if (dx < 0) { src_row += (-dx) * 2; dw += dx; dx = 0; }
+    if (dx + dw > display_width_) dw = display_width_ - dx;
+    if (dw <= 0) continue;
+    memcpy(canvas_buf_ + (dy * (int)canvas_stride_ + dx * 2), src_row, dw * 2);
+  }
+}
+#endif  // USE_LVGL
+
 void RemoteWebView::setup() {
   self_ = this;
+
+#ifdef USE_LVGL
+  if (lvgl_mode_) {
+    // display_width_, display_height_, display_rotation_ already set in set_obj()
+    // Just start tasks and touchscreen listener
+    q_decode_ = xQueueCreate(cfg::decode_queue_depth, sizeof(WsMsg));
+    ws_send_mtx_ = xSemaphoreCreateMutex();
+    state_mtx_ = xSemaphoreCreateMutex();
+
+    start_decode_task_();
+    start_ws_task_();
+
+    if (touch_) {
+      touch_listener_ = new RemoteWebViewTouchListener(this);
+      touch_->register_listener(touch_listener_);
+      ESP_LOGD(TAG, "touch listener registered (lvgl mode)");
+    }
+    return;
+  }
+#endif  // USE_LVGL
 
   if (!display_) {
     ESP_LOGE(TAG, "no display");
@@ -162,6 +235,11 @@ void RemoteWebView::setup() {
 
 void RemoteWebView::loop() {
   if (this->frame_update_pending_.exchange(false, std::memory_order_acq_rel)) {
+#ifdef USE_LVGL
+    if (lvgl_mode_ && canvas_obj_) {
+      lv_obj_invalidate(canvas_obj_);
+    }
+#endif
     this->trigger_on_frame_update();
   }
 
@@ -224,13 +302,15 @@ void RemoteWebView::dump_config() {
   print_opt_int   ("max_bytes_per_msg",         max_bytes_per_msg_);
   print_opt_int   ("big_endian",                rgb565_big_endian_);
   print_opt_int   ("rotation",                  rotation_);
+  ESP_LOGCONFIG(TAG, "  lvgl_mode: %s", lvgl_mode_ ? "yes" : "no");
   ESP_LOGCONFIG(TAG, "  display_rotation: %d", display_rotation_);
-  ESP_LOGCONFIG(TAG, "  total_rotation: %d", (display_rotation_ + rotation_) % 360);
+  const int total_rotation = lvgl_mode_ ? rotation_ : (display_rotation_ + rotation_) % 360;
+  ESP_LOGCONFIG(TAG, "  total_rotation: %d", total_rotation);
 }
 
 bool RemoteWebView::open_url(const std::string &s, bool force) {
   if (s.empty()) return false;
-  
+
   if (!ws_client_ || !esp_websocket_client_is_connected(ws_client_))
     return false;
 
@@ -240,7 +320,7 @@ bool RemoteWebView::open_url(const std::string &s, bool force) {
     ESP_LOGD(TAG, "opened URL: %s (force=%d)", s.c_str(), (int)force);
     return true;
   }
-  
+
   return false;
 }
 
@@ -524,6 +604,13 @@ bool RemoteWebView::decode_jpeg_tile_to_lcd_(int16_t dst_x, int16_t dst_y, const
       return decode_jpeg_tile_software_(dst_x, dst_y, data, len);
     }
 
+#ifdef USE_LVGL
+    if (lvgl_mode_ && canvas_buf_) {
+      write_tile_to_canvas_(dst_x, dst_y, (int)hdr.width, (int)hdr.height,
+                            (int)hdr.width, hw_decode_output_buf_);
+      return true;
+    }
+#endif
     display_->draw_pixels_at(dst_x, dst_y, (int)hdr.width, (int)hdr.height, hw_decode_output_buf_,
         esphome::display::COLOR_ORDER_RGB,
         esphome::display::COLOR_BITNESS_565,
@@ -561,11 +648,18 @@ int RemoteWebView::jpeg_draw_cb_s_(JPEGDRAW *p) {
 
 int RemoteWebView::jpeg_draw_cb_(JPEGDRAW *p) {
   int32_t x = p->x, y = p->y, w = p->iWidth, h = p->iHeight;
-  
+
   if (x >= display_width_ || y >= display_height_) return 1;
   if (x + w > display_width_) w = display_width_ - x;
   if (y + h > display_height_) h = display_height_ - y;
   if (w <= 0 || h <= 0) return 1;
+
+#ifdef USE_LVGL
+  if (lvgl_mode_ && canvas_buf_) {
+    write_tile_to_canvas_(x, y, w, h, p->iWidth, (const uint8_t *)p->pPixels);
+    return 1;
+  }
+#endif
 
   display_->draw_pixels_at(
       x, y, w, h,
@@ -605,6 +699,17 @@ bool RemoteWebView::ws_send_touch_event_(proto::TouchType type, int x, int y, ui
 
   ESP_LOGD(TAG, "[touch] raw x=%d y=%d rot=%d", x, y, display_rotation_);
 
+#ifdef USE_LVGL
+  if (lvgl_mode_) {
+    // Ignore touches outside the canvas widget (e.g. toolbar above)
+    if (x < canvas_x_off_ || y < canvas_y_off_ ||
+        x >= canvas_x_off_ + display_width_ || y >= canvas_y_off_ + display_height_)
+      return false;
+    x -= canvas_x_off_;
+    y -= canvas_y_off_;
+  }
+#endif
+
   // The server applies mapPointForRotation(total_rotation) to coordinates it receives.
   // We want the browser to receive the *visual* (unrotated) coordinates so that
   // gestures feel natural (left→right swipe = horizontal browser movement, etc.).
@@ -614,7 +719,7 @@ bool RemoteWebView::ws_send_touch_event_(proto::TouchType type, int x, int y, ui
   //   total=90 : pre-inverse = 270° → (H-1-y, x)
   //   total=180: pre-inverse = 180° → (W-1-x, H-1-y)
   //   total=270: pre-inverse = 90°  → (y, W-1-x)
-  const int total_rotation = (display_rotation_ + rotation_) % 360;
+  const int total_rotation = lvgl_mode_ ? rotation_ : (display_rotation_ + rotation_) % 360;
   switch (total_rotation) {
     case 90: {
       const int new_x = (display_height_ - 1) - y;
@@ -839,8 +944,9 @@ std::string RemoteWebView::build_ws_uri_() const {
   append_q_int_(uri, "w", display_width_);
   append_q_int_(uri, "h", display_height_);
 
-  // Combine display's physical rotation with any user-defined additional rotation
-  const int total_rotation = (display_rotation_ + rotation_) % 360;
+  // In LVGL mode, LVGL handles display_rotation internally; only send user rotation.
+  // In standalone mode, combine display physical rotation with user rotation.
+  const int total_rotation = lvgl_mode_ ? rotation_ : (display_rotation_ + rotation_) % 360;
   append_q_int_(uri,   "r",    total_rotation);
   append_q_int_(uri,   "ts",   tile_size_);
   append_q_int_(uri,   "fftc", full_frame_tile_count_);

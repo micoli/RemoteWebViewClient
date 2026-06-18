@@ -28,6 +28,14 @@
   #define REMOTE_WEBVIEW_HAS_CACHE_MSYNC 0
 #endif
 
+#ifdef USE_LVGL
+// Suppress lv_conf resolution issues — must come before any lvgl include
+#ifndef LV_CONF_H
+#define LV_CONF_SKIP 1  // NOLINT
+#endif
+#include "esphome/components/lvgl/lvgl_esphome.h"
+#endif  // USE_LVGL
+
 namespace esphome {
 namespace remote_webview {
 
@@ -49,6 +57,9 @@ class RemoteWebView : public Component {
   void set_big_endian(bool v) { rgb565_big_endian_ = v; }
   void set_rotation(int v) { rotation_ = v; }
   void set_streaming_paused(bool v) { streaming_paused_ = v; }
+#ifdef USE_LVGL
+  void set_obj(lv_obj_t *canvas_obj);
+#endif
   void disable_touch(bool disable);
   bool open_url(const std::string &s, bool force = false);
   std::string get_current_url() const;
@@ -107,6 +118,16 @@ class RemoteWebView : public Component {
   int rotation_{0};
   bool touch_disabled_{false};
   bool streaming_paused_{false};
+  bool lvgl_mode_{false};
+
+#ifdef USE_LVGL
+  lv_obj_t *canvas_obj_{nullptr};
+  uint8_t  *canvas_buf_{nullptr};
+  uint32_t  canvas_stride_{0};
+  int       canvas_x_off_{0};
+  int       canvas_y_off_{0};
+  void write_tile_to_canvas_(int x, int y, int w, int h, int src_stride, const uint8_t *pixels);
+#endif
 
 #if REMOTE_WEBVIEW_HW_JPEG
   jpeg_decoder_handle_t hw_dec_{nullptr};
