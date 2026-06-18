@@ -50,7 +50,7 @@ class RemoteWebView : public Component {
   void set_rotation(int v) { rotation_ = v; }
   void set_streaming_paused(bool v) { streaming_paused_ = v; }
   void disable_touch(bool disable);
-  bool open_url(const std::string &s);
+  bool open_url(const std::string &s, bool force = false);
   std::string get_current_url() const;
   void set_url_sensor(text_sensor::TextSensor *s) { url_sensor_ = s; }
   void add_on_frame_update_callback(std::function<void()> &&callback);

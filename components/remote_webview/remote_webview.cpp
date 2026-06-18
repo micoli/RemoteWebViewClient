@@ -228,15 +228,16 @@ void RemoteWebView::dump_config() {
   ESP_LOGCONFIG(TAG, "  total_rotation: %d", (display_rotation_ + rotation_) % 360);
 }
 
-bool RemoteWebView::open_url(const std::string &s) {
+bool RemoteWebView::open_url(const std::string &s, bool force) {
   if (s.empty()) return false;
   
   if (!ws_client_ || !esp_websocket_client_is_connected(ws_client_))
     return false;
-  
-  if (ws_send_open_url_(s.c_str(), 0)) {
+
+  const uint16_t flags = force ? proto::kFlagOpenURLForce : 0;
+  if (ws_send_open_url_(s.c_str(), flags)) {
     url_ = s;
-    ESP_LOGD(TAG, "opened URL: %s", s.c_str());
+    ESP_LOGD(TAG, "opened URL: %s (force=%d)", s.c_str(), (int)force);
     return true;
   }
   
